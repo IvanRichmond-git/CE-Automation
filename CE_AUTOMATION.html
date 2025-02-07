@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Commercial Enablement Tools</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.17.2/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            text-align: center;
+        }
+        h1 {
+            margin-bottom: 20px;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .upload-box {
+            width: 150px;
+            height: 150px;
+            background-color: lightgray;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 15px;
+            border: 1px solid #333;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        .upload-box:hover {
+            background-color: #ddd;
+        }
+        a {
+            color: blue;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        input[type="file"] {
+            display: none;
+        }
+        .date-input {
+            margin: 10px 0;
+            padding: 5px;
+            font-size: 14px;
+        }
+        .status-message {
+            margin-top: 10px;
+            font-weight: bold;
+            color: green;
+        }
+    </style>
+</head>
+<body>
+    <h1>COMMERCIAL ENABLEMENT TOOLS</h1>
+    <div class="container">
+        <p>Dollar File Production</p>
+        <a href="#">Input Format</a>
+
+        <label for="transmitDate">Select Transmission Date:</label>
+        <input type="date" id="transmitDate" class="date-input">
+        
+        <div class="upload-box" onclick="document.getElementById('fileInput').click()">
+            Upload File
+        </div>
+        <input type="file" id="fileInput" accept=".xlsx">
+        <p class="status-message" id="statusMessage"></p>
+    </div>
+
+    <script>
+        document.getElementById('fileInput').addEventListener('change', function(event) {
+            const file = event.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+                    const jsonData = XLSX.utils.sheet_to_json(sheet);
+                    processFile(jsonData);
+                };
+                reader.readAsArrayBuffer(file);
+            }
+        });
+
+        function processFile(data) {
+            const transmitDate = document.getElementById('transmitDate').value;
+            if (!transmitDate) {
+                alert("Please select a transmission date.");
+                return;
+            }
+
+            const formattedDate = new Date(transmitDate).toLocaleDateString('en-US', {
+                year: 'numeric', month: 'long', day: 'numeric'
+            });
+
+            const grouped = {};
+            data.forEach(row => {
+                if (!grouped[row.Filename]) {
+                    grouped[row.Filename] = [];
+                }
+                grouped[row.Filename].push(row);
+            });
+
+            const zip = new JSZip();
+            const folder = zip.folder("Dollar Files");
+
+            Object.keys(grouped).forEach(filename => {
+                const group = grouped[filename];
+                const projectCode = group[0]['PROJECT CODE'];
+                const specialTypeValue = filename.split('_').slice(3).join('_').split('.')[0];
+
+                let output = `CLIENT NAME           : META PLATFORMS, INC.\n` +
+                             `PROJECT CODE          : ${projectCode}\n` +
+                             `PROJECT NAME          : Product Data Operations (Gen AI)\n` +
+                             `CONTACT PERSON (CLIENT): Sam [samaraw@meta.com] and Emily [emilyfrancia@meta.com]\n` +
+                             `PRODUCTION CONTACT    : Nette Lagonilla\n` +
+                             `DATE TRANSMITTED      : ${formattedDate}\n\n` +
+                             `TRANSMISSION FILENAME : ${filename}\n` +
+                             `SPECIAL INVOICING TYPE: Staffing Group\n` +
+                             `SPECIAL TYPE VALUE    : ${specialTypeValue}\n\n`;
+
+                group.forEach(row => {
+                    output += `FACILITY             : ${row.Facility}\n` +
+                              `BILLING ITEM NUMBER  : ${row['Billing Item Number']}\n` +
+                              `TOTAL BILLABLE QUANTITY : ${parseFloat(row['Total Billable Quantity']).toFixed(2)}\n\n`;
+                });
+                output += "=".repeat(60) + "\n";
+
+                folder.file(`${filename}.txt`, output);
+            });
+
+            zip.generateAsync({ type: "blob" }).then(function(content) {
+                const link = document.createElement("a");
+                link.href = URL.createObjectURL(content);
+                link.download = "Dollar_Files.zip";
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+
+                document.getElementById("statusMessage").textContent = "Dollar Files generated successfully!";
+            });
+        }
+    </script>
+</body>
+</html>

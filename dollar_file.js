@@ -48,7 +48,7 @@ function processDollarFile(data, transmitDate) {
                      `PRODUCTION CONTACT    : Nette Lagonilla\n` +
                      `DATE TRANSMITTED      : ${transmitDate}\n\n` +
                      `TRANSMISSION FILENAME : ${filename}\n` +
-                     `SPECIAL INVOICING TYPE: Staffing Group\n` +
+                     `SPECIAL INVOICING TYPE: PO Number\n` +
                      `SPECIAL TYPE VALUE    : ${specialTypeValue}\n\n`;
 
         group.forEach(row => {

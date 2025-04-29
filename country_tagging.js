@@ -6,19 +6,15 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 });
 
-/**
- * Displays a full-page loading overlay.
- */
+/** Full-page “please wait” overlay */
 function showLoadingScreen() {
   const overlay = document.createElement("div");
   overlay.id = "loadingOverlay";
   Object.assign(overlay.style, {
     position: "fixed",
-    top: "0",
-    left: "0",
-    width: "100%",
-    height: "100%",
-    backgroundColor: "rgba(0, 0, 0, 0.5)",
+    top: "0", left: "0",
+    width: "100%", height: "100%",
+    backgroundColor: "rgba(0,0,0,0.5)",
     color: "white",
     display: "flex",
     justifyContent: "center",
@@ -30,363 +26,276 @@ function showLoadingScreen() {
   document.body.appendChild(overlay);
 }
 
-/**
- * Hides the loading overlay if it exists.
- */
+/** Remove the overlay */
 function hideLoadingScreen() {
-  const overlay = document.getElementById("loadingOverlay");
-  if (overlay) overlay.remove();
+  const o = document.getElementById("loadingOverlay");
+  if (o) o.remove();
 }
 
-/**
- * Reads the selected file and triggers processing.
- */
+/** Read the selected file and hand off the rows */
 function handleCountryTaggingFile(event) {
   const file = event.target.files[0];
   if (!file) {
     hideLoadingScreen();
     return;
   }
-
   const reader = new FileReader();
-
-  // Catch file reading errors.
-  reader.onerror = (error) => {
-    console.error("Error reading file:", error);
-    alert("An error occurred while reading the file. Please try a different file.");
+  reader.onerror = (err) => {
+    console.error("FileReader error:", err);
+    alert("Error reading file.");
     hideLoadingScreen();
   };
-
   reader.onload = (e) => {
     try {
       const data = new Uint8Array(e.target.result);
-      const workbook = XLSX.read(data, { type: "array" });
-
-      if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
-        throw new Error("No sheets found in the Excel file.");
-      }
-
-      const firstSheet = workbook.SheetNames[0];
-      const sheet = workbook.Sheets[firstSheet];
+      const wb   = XLSX.read(data, { type: "array" });
+      if (!wb.SheetNames.length) throw new Error("No sheets found");
+      const sheet    = wb.Sheets[wb.SheetNames[0]];
       const jsonData = XLSX.utils.sheet_to_json(sheet);
-
-      // Check for empty data.
-      if (!jsonData || jsonData.length === 0) {
-        alert("The file does not contain any data.");
+      if (!jsonData.length) {
+        alert("No data found.");
         hideLoadingScreen();
         return;
       }
-
       processCountryTaggingFile(jsonData);
-    } catch (error) {
-      console.error("Error processing file:", error);
-      alert("There was an error processing the file. Please ensure the file is valid and try again.");
+    } catch (err) {
+      console.error("Processing error:", err);
+      alert("Error processing file. Check format and retry.");
       hideLoadingScreen();
     }
   };
-
   reader.readAsArrayBuffer(file);
 }
 
 /**
- * Processes the country tagging file data.
- * 
- * Step 1: Groups rows by line item. The line item key is defined as:
- *         PO|Work City|Project|Planning Group|Role|Level|Language|Week|Country
- *         (Each line item now shows the total hours.)
- * 
- * Step 2: Extracts any Max Bill Adjustment rows (where Country is "No Assigned Country Yet")
- *         and maps them to their base line item (all fields except Country).
- * 
- * Step 3: For each base line item, distributes the Max Bill Adjustment among the available
- *         countries following these rules:
- *           - Philippines and India share the adjustment equally until one (or both) is exhausted.
- *           - Any remaining adjustment is split equally among United States, Canada, and Israel.
+ * Main pipeline:
+ *   1) Group in integer cents by all keys (incl. Facility & Country)
+ *   2) Extract raw “Max Bill Adjustment” cents
+ *   3) For each base line:
+ *       • build availableUnitsCents
+ *       • distribute as much as possible into (Country|Facility)
+ *       • if rawAdj > allocated, append a placeholder row for leftover
+ *   4) Build XLSX and download
  */
 function processCountryTaggingFile(data) {
   try {
-    // --- Step 1: Group data by line item ---
-    const groupedData = {};
-    data.forEach((row) => {
-      // Build the key using the defined fields.
-      const key = `${row.PO}|${row["Work City"]}|${row.Project}|${row["Planning Group"]}|${row.Role}|${row.Level}|${row.Language}|${row.Week}|${row.Country}`;
-      const hours = parseFloat(row.Hours) || 0;
-      if (!groupedData[key]) {
-        groupedData[key] = { hours: 0 };
-      }
-      groupedData[key].hours += hours;
+    // ---- 1) GROUP INTO CENTS ----
+    const toCents = hrs => Math.round(parseFloat(hrs) * 100);
+    const groupedCents = {};
+    data.forEach(row => {
+      const key =
+        `${row.PO}|${row["Work City"]}|${row.Project}|${row["Planning Group"]}` +
+        `|${row.Role}|${row.Level}|${row.Language}|${row.Week}` +
+        `|${row["Facility Code"]}|${row.Country}`;
+      groupedCents[key] = (groupedCents[key] || 0) + toCents(row.Hours || 0);
     });
 
-    // --- Step 2: Extract Max Bill Adjustments ---
-    // These are the rows where the Country is "No Assigned Country Yet".
-    const maxBillAdjustments = {};
-    for (const key in groupedData) {
-      if (key.endsWith("|No Assigned Country Yet")) {
-        // Remove the "No Assigned Country Yet" part to get the base line item key.
-        const baseKey = key.replace("|No Assigned Country Yet", "");
-        // Sum adjustments if there are multiple (using absolute value).
-        maxBillAdjustments[baseKey] = (maxBillAdjustments[baseKey] || 0) + Math.abs(groupedData[key].hours);
+    // ---- 2) EXTRACT RAW ADJUSTMENTS ----
+    const FAC_PLACEHOLDER = "No Assigned Facility Code Yet";
+    const CTR_PLACEHOLDER = "No Assigned Country Yet";
+    const placeholderSuffix = `|${FAC_PLACEHOLDER}|${CTR_PLACEHOLDER}`;
+
+    // raw adjustments per baseKey (in cents)
+    const rawAdjCentsMap = {};
+    for (const key in groupedCents) {
+      if (key.endsWith(placeholderSuffix)) {
+        const baseKey = key.slice(0, -placeholderSuffix.length);
+        rawAdjCentsMap[baseKey] = (rawAdjCentsMap[baseKey] || 0)
+                                 + Math.abs(groupedCents[key]);
       }
     }
 
-    // Remove "No Assigned Country Yet" entries from the grouped data so they don’t appear in the final output.
-    const validGroupedData = {};
-    for (const key in groupedData) {
-      if (!key.endsWith("|No Assigned Country Yet")) {
-        validGroupedData[key] = groupedData[key];
+    // keep only real buckets
+    const validCents = {};
+    for (const key in groupedCents) {
+      if (!key.endsWith(placeholderSuffix)) {
+        validCents[key] = groupedCents[key];
       }
     }
 
-    // --- Step 3: Distribute the Max Bill Adjustments ---
+    // ---- 3) DISTRIBUTE & CAPTURE LEFTOVERS ----
     const adjustmentRows = [];
-    for (const baseKey in maxBillAdjustments) {
-      const adjustment = maxBillAdjustments[baseKey];
+    Object.entries(rawAdjCentsMap).forEach(([baseKey, rawCents]) => {
+      // collect that line’s valid buckets
+      const buckets = Object.entries(validCents)
+        .filter(([k]) => k.startsWith(baseKey + "|"));
 
-      // Find all valid entries for this base line item.
-      const matchingEntries = Object.entries(validGroupedData).filter(([key]) =>
-        key.startsWith(baseKey)
-      );
-
-      // Map available hours per country from the matching entries.
-      const countryHours = {};
-      matchingEntries.forEach(([key, value]) => {
-        const segments = key.split("|");
-        const country = segments[segments.length - 1];
-        countryHours[country] = value.hours;
+      // build availability map
+      const availableUnitsCents = {};
+      buckets.forEach(([k, cents]) => {
+        const parts    = k.split("|");
+        const country  = parts.pop();
+        const facility = parts.pop();
+        const unitKey  = `${country}|${facility}`;
+        availableUnitsCents[unitKey] = (availableUnitsCents[unitKey] || 0) + cents;
       });
 
-      // Distribute the adjustment according to the rules.
-      const deductions = distributeAdjustment(adjustment, countryHours);
+      // 3a) run pure-integer distribution
+      const allocations = distributePlacementCents(rawCents, availableUnitsCents);
 
-      // Create adjustment rows (only if a country is absorbing part of the adjustment).
-      for (const country in deductions) {
-        const deducted = deductions[country];
-        if (deducted > 0) {
-          // The adjustment is output as a negative number.
-          adjustmentRows.push(["Max Bill Adjustment", ...baseKey.split("|"), country, -deducted]);
+      // 3b) emit one adjustment row per (Country|Facility)
+      let allocatedSum = 0;
+      Object.entries(allocations).forEach(([unitKey, centsDeducted]) => {
+        if (centsDeducted > 0) {
+          allocatedSum += centsDeducted;
+          const [country, facility] = unitKey.split("|");
+          adjustmentRows.push([
+            "Max Bill Adjustment",
+            ...baseKey.split("|"),
+            facility,
+            country,
+            -(centsDeducted / 100)   // back to hours
+          ]);
         }
-      }
-    }
-
-    // --- Prepare the output rows ---
-    const header = [
-      "Type of Hours",
-      "PO",
-      "Work City",
-      "Project",
-      "Planning Group",
-      "Role",
-      "Level",
-      "Language",
-      "Week",
-      "Country",
-      "Total Hours",
-    ];
-    const outputRows = [header];
-
-    // Add the valid grouped rows (sorted for consistency).
-    Object.keys(validGroupedData)
-      .sort()
-      .forEach((key) => {
-        const segments = key.split("|");
-        outputRows.push(["SRT", ...segments, validGroupedData[key].hours]);
       });
 
-    // Append the adjustment rows (sorted if needed).
-    adjustmentRows
-      .sort((a, b) => a.join("|").localeCompare(b.join("|")))
-      .forEach((row) => outputRows.push(row));
+      // 3c) if there’s any leftover cents, stick them on the placeholder bucket
+      const leftover = rawCents - allocatedSum;
+      if (leftover > 0) {
+        adjustmentRows.push([
+          "Max Bill Adjustment",
+          ...baseKey.split("|"),
+          FAC_PLACEHOLDER,
+          CTR_PLACEHOLDER,
+          -(leftover / 100)
+        ]);
+      }
+    });
 
-    // --- Generate and download the Excel file ---
-    const worksheet = XLSX.utils.aoa_to_sheet(outputRows);
-    const newWorkbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(newWorkbook, worksheet, "Country Adjustment Output");
-    const excelBuffer = XLSX.write(newWorkbook, { bookType: "xlsx", type: "array" });
+    // ---- 4) BUILD OUTPUT & DOWNLOAD ----
+    const header = [
+      "Type of Hours","PO","Work City","Project","Planning Group",
+      "Role","Level","Language","Week",
+      "Facility Code","Country","Total Hours"
+    ];
+    const output = [header];
+
+    // SRT rows
+    Object.keys(validCents).sort().forEach(key => {
+      output.push([
+        "SRT", 
+        ...key.split("|"), 
+        validCents[key] / 100
+      ]);
+    });
+
+    // Adjustment rows
+    adjustmentRows
+      .sort((a,b) => a.join("|").localeCompare(b.join("|")))
+      .forEach(r => output.push(r));
+
+    const ws  = XLSX.utils.aoa_to_sheet(output);
+    const wb2 = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb2, ws, "Country-Facility Adjustment");
+    const buf = XLSX.write(wb2, { bookType:"xlsx", type:"array" });
+
     downloadFile(
-      new Blob([excelBuffer], { type: "application/octet-stream" }),
-      "Country-Tagged.xlsx"
+      new Blob([buf], { type: "application/octet-stream" }),
+      "Facility-Country-Tagged.xlsx"
     );
-  } catch (error) {
-    console.error("Error processing data:", error);
-    alert("An error occurred while processing the file. Please check the file format and try again.");
+  } catch (err) {
+    console.error(err);
+    alert("Error processing data; please check the file.");
   } finally {
     hideLoadingScreen();
   }
 }
 
 /**
- * Distributes the max bill adjustment among countries based on available hours.
+ * Pure-integer distribution of adjCents across availableUnitsCents:
+ *   • Two tiers (PH/IN first, then US/CA/IL)
+ *   • Floor-divide for equal share, then distribute actual leftover
+ *   • Final sweep to correct any single-cent errors
  *
- * The adjustment is distributed in two groups:
- *   1. Primary: Philippines and India
- *   2. Fallback: United States, Canada, and Israel
- *
- * For each group, the function ensures that the amount is divisible with at most two decimals.
- * If the amount is not perfectly divisible, it sets aside the remainder (in cents) and
- * distributes it one cent at a time after the equal split.
- *
- * IMPORTANT: We also track the original capacity of each country so we never exceed it
- * (even in the final integer-math rounding stage).
- *
- * @param {number} adjustment - The total adjustment to distribute (absolute value).
- * @param {object} availableHours - An object mapping country names to available hours.
- * @returns {object} deductions - An object mapping each country to the number of hours deducted.
+ * @param {number} adjCents
+ * @param {Record<string,number>} availableUnitsCents
+ * @returns {Record<string,number>} deductions in cents
  */
-function distributeAdjustment(adjustment, availableHours) {
-  // Record each country's original capacity so we don't exceed it after rounding.
-  const originalCapacity = { ...availableHours };
-
-  // Make a mutable copy of available hours.
-  const available = { ...availableHours };
-
-  // Ensure keys exist.
-  const allCountries = ["Philippines", "India", "United States", "Canada", "Israel"];
-  allCountries.forEach((country) => {
-    if (available[country] === undefined) {
-      available[country] = 0;
-      originalCapacity[country] = 0;
-    }
-  });
-
-  // Cap the adjustment if it exceeds total available.
-  const totalAvailable = allCountries.reduce((sum, country) => sum + available[country], 0);
-  if (adjustment > totalAvailable) {
-    console.warn(
-      `Requested adjustment ${adjustment} exceeds total available hours ${totalAvailable}. Adjusting to ${totalAvailable}.`
-    );
-    adjustment = totalAvailable;
-  }
-
-  // We'll accumulate deductions here.
-  const deductions = {
-    Philippines: 0,
-    India: 0,
-    "United States": 0,
-    Canada: 0,
-    Israel: 0,
-  };
-
-  let remaining = adjustment;
-  const epsilon = 1e-6;
-
-  // Helper: distribute within a group ensuring two-decimal divisibility.
-  function distributeInGroup(groupCountries, remainingAmount) {
-    // Consider only countries in the group that still have available capacity.
-    const activeCountries = groupCountries.filter(country => available[country] > epsilon);
-    const divisor = activeCountries.length;
-    if (divisor === 0) return 0;
-
-    // Convert the remaining amount to cents.
-    const remCents = Math.round(remainingAmount * 100);
-    // Determine the remainder (in cents) when divided by the number of countries.
-    const remainderCents = remCents % divisor;
-    const divisibleCents = remCents - remainderCents;
-    // The equal share (in dollars) for a perfectly divisible amount.
-    const share = divisibleCents / divisor / 100;
-
-    let totalDeducted = 0;
-    // Distribute the equal share to each active country,
-    // but do not exceed its available capacity.
-    activeCountries.forEach(country => {
-      const deduct = Math.min(available[country], share);
-      deductions[country] += deduct;
-      available[country] -= deduct;
-      totalDeducted += deduct;
-    });
-
-    // Now distribute the set-aside remainder one cent at a time.
-    let remainderDollars = remainderCents / 100;
-    for (let i = 0; i < remainderCents; i++) {
-      // Try to assign one cent to the first active country that can still deduct.
-      for (let j = 0; j < activeCountries.length; j++) {
-        const country = activeCountries[j];
-        if (available[country] > epsilon && remainderDollars > 0) {
-          const oneCent = 0.01;
-          const deduct = Math.min(oneCent, available[country], remainderDollars);
-          deductions[country] += deduct;
-          available[country] -= deduct;
-          totalDeducted += deduct;
-          remainderDollars -= deduct;
-          break; // assign one cent at a time
-        }
-      }
-    }
-    return totalDeducted;
-  }
-
-  // Define groups in the order of processing.
-  const groups = [
-    { countries: ["Philippines", "India"] },
-    { countries: ["United States", "Canada", "Israel"] }
+function distributePlacementCents(adjCents, availableUnitsCents) {
+  const unitKeys = Object.keys(availableUnitsCents);
+  const tiers = [
+    ["Philippines","India"],
+    ["United States","Canada","Israel"]
   ];
 
-  // Process each group until the entire adjustment is distributed.
-  groups.forEach(group => {
-    while (remaining > epsilon) {
-      const deducted = distributeInGroup(group.countries, remaining);
-      if (deducted < epsilon) break; // if no further deduction is possible
-      remaining -= deducted;
-    }
+  // clone capacities
+  const origCap = {}, availCap = {};
+  unitKeys.forEach(k => {
+    origCap[k]  = availableUnitsCents[k];
+    availCap[k] = availableUnitsCents[k];
   });
 
-  // --- Final Integer Math Adjustment ---
-  // Only adjust countries that actually received a deduction.
-  const distributedCountries = Object.keys(deductions).filter(country => deductions[country] > 0);
-  let deductionCents = {};
-  let totalDeductedCents = 0;
-  distributedCountries.forEach((country) => {
-    // Convert to integer cents by flooring.
-    const cents = Math.floor(deductions[country] * 100);
-    deductionCents[country] = cents;
-    totalDeductedCents += cents;
-  });
+  // init deductions
+  const deductions = Object.fromEntries(unitKeys.map(k=>[k,0]));
+  let remaining = adjCents;
 
-  // The total we aim for in cents.
-  const targetCents = Math.round(adjustment * 100);
-  let centError = targetCents - totalDeductedCents;
+  // distribute for one tier
+  function distTier(countries) {
+    const active = unitKeys.filter(k => {
+      const country = k.split("|")[0];
+      return countries.includes(country) && availCap[k] > 0;
+    });
+    const n = active.length;
+    if (!n) return 0;
 
-  // Distribute the cent error one cent at a time among the countries that can still absorb it
-  // without exceeding their original capacity.
-  while (centError !== 0) {
-    let changed = false;
-    for (let i = 0; i < distributedCountries.length && centError !== 0; i++) {
-      const country = distributedCountries[i];
-      const currentDeduction = deductionCents[country] / 100;
-      const capacity = originalCapacity[country];
-      
-      if (centError > 0) {
-        // We want to add a cent if it won't exceed the country's capacity.
-        // i.e., currentDeduction + 0.01 <= capacity
-        if (currentDeduction + 0.01 <= capacity + epsilon) {
-          deductionCents[country]++;
-          centError--;
-          changed = true;
-        }
-      } else {
-        // centError < 0, so we want to remove a cent if possible.
-        // i.e., deductionCents[country] > 0
-        if (deductionCents[country] > 0) {
-          deductionCents[country]--;
-          centError++;
-          changed = true;
+    // 1) floor-share
+    const share = Math.floor(remaining / n);
+    let allocated = 0;
+    active.forEach(k => {
+      const give = Math.min(availCap[k], share);
+      deductions[k] += give;
+      availCap[k] -= give;
+      allocated += give;
+    });
+
+    // 2) true leftover = remaining - allocated
+    let leftover = remaining - allocated;
+    for (let i = 0; i < leftover; i++) {
+      for (const k of active) {
+        if (availCap[k] > 0) {
+          deductions[k]++;
+          availCap[k]--;
+          allocated++;
+          break;
         }
       }
     }
-    // If we couldn't fix the centError in this pass (no changes), break to avoid infinite loops.
-    if (!changed) break;
+
+    return allocated;
   }
 
-  // Convert final deductions from cents to decimal hours.
-  distributedCountries.forEach((country) => {
-    deductions[country] = deductionCents[country] / 100;
+  // apply both tiers
+  tiers.forEach(tier => {
+    let got;
+    do {
+      got = distTier(tier);
+      remaining -= got;
+    } while (got > 0 && remaining > 0);
   });
+
+  // final cent-correction
+  let centError = adjCents - Object.values(deductions).reduce((s,v)=>s+v,0);
+  while (centError !== 0) {
+    let any = false;
+    for (const k of unitKeys) {
+      if (centError > 0 && deductions[k] < origCap[k]) {
+        deductions[k]++;
+        centError--;
+        any = true;
+      } else if (centError < 0 && deductions[k] > 0) {
+        deductions[k]--;
+        centError++;
+        any = true;
+      }
+      if (centError === 0) break;
+    }
+    if (!any) break;
+  }
 
   return deductions;
 }
 
-/**
- * Creates a temporary download link for the file blob and triggers the download.
- */
+/** Trigger file download */
 function downloadFile(blob, filename) {
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);

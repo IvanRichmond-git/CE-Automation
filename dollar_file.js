@@ -54,7 +54,7 @@ function processDollarFile(data, transmitDate) {
         group.forEach(row => {
             output += `FACILITY             : ${row.Facility}\n` +
                       `BILLING ITEM NUMBER  : ${row['Billing Item Number']}\n` +
-                      `TOTAL BILLABLE QUANTITY : ${parseFloat(row['Total Billable Quantity']).toFixed(2)}\n\n`;
+                      `TOTAL BILLABLE QUANTITY : ${parseFloat(row['Total Billable Quantity']).toFixed(6)}\n\n`;
         });
         output += "=".repeat(60) + "\n";
 
@@ -70,3 +70,4 @@ function processDollarFile(data, transmitDate) {
         document.body.removeChild(link);
     });
 }
+

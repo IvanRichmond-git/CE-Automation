@@ -72,7 +72,6 @@ function processDollarFile(data, transmitDate) {
       `CLIENT NAME           : MUSTANG PLATFORMS, INC.\n` +
       `PROJECT CODE          : ${projectCode}\n` +
       `PROJECT NAME          : ${projectName}\n` +
-      `CONTACT PERSON (CLIENT): Sam [samaraw@meta.com] and Emily [emilyfrancia@meta.com]\n` +
       `PRODUCTION CONTACT    : Nette Lagonilla\n` +
       `DATE TRANSMITTED      : ${transmitDate}\n\n` +
       `TRANSMISSION FILENAME : ${filename}\n` +
@@ -104,3 +103,4 @@ function processDollarFile(data, transmitDate) {
     document.body.removeChild(link);
   });
 }
+

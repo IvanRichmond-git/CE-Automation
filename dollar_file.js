@@ -41,7 +41,7 @@ function processDollarFile(data, transmitDate) {
         const group = grouped[filename];
         const projectCode = group[0]['PROJECT CODE'];
         const specialTypeValue = filename.split('_').slice(3).join('_').split('.')[0];
-        let output = `CLIENT NAME           : META PLATFORMS, INC.\n` +
+        let output = `CLIENT NAME           : MUSTANG PLATFORMS, INC.\n` +
                      `PROJECT CODE          : ${projectCode}\n` +
                      `PROJECT NAME          : Product Data Operations (Gen AI)\n` +
                      `CONTACT PERSON (CLIENT): Sam [samaraw@meta.com] and Emily [emilyfrancia@meta.com]\n` +
@@ -70,4 +70,5 @@ function processDollarFile(data, transmitDate) {
         document.body.removeChild(link);
     });
 }
+
 
